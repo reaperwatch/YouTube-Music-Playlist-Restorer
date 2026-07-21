@@ -1,0 +1,17 @@
+{
+  "name": "csvimport",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "slashing__moon",
+  "type": "commonjs",
+  "main": "src/yt-csv-to-playlist.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node ."
+  },
+  "dependencies": {
+    "@steipete/sweet-cookie": "^0.4.0",
+    "csv-parser": "^3.2.1"
+  }
+}
