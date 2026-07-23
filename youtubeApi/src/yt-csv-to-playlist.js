@@ -5,7 +5,30 @@ const csv = require("csv-parser");
 const crypto = require("crypto");
 const readline = require("readline/promises");
 
-const BATCH_SIZE = 20; // Number of videos to add in each batch request (change to your liking but keep it reasonable to avoid rate limits)
+const BATCH_SIZE = 20; // Number of videos per batch request
+
+function saveState(filePath, csvFilename, data) {
+  let allStates = {};
+
+  if (fs.existsSync(filePath)) {
+    try {
+      const rawData = fs.readFileSync(filePath, "utf8");
+      allStates = JSON.parse(rawData);
+
+      if (allStates.csvFile && typeof allStates.csvFile === "string") {
+        const oldFilename = allStates.csvFile;
+        delete allStates.csvFile;
+        allStates = { [oldFilename]: allStates };
+      }
+    } catch (e) {
+      allStates = {};
+    }
+  }
+
+  allStates[csvFilename] = data;
+
+  fs.writeFileSync(filePath, JSON.stringify(allStates, null, 2), "utf8");
+}
 
 function getAuthHeader(cookieStr) {
   const match = cookieStr.match(/SAPISID=([^;]+)/);
@@ -21,15 +44,14 @@ function getAuthHeader(cookieStr) {
 const { getExtraChromiumProfiles } = require("./browser-paths");
 
 async function extractYouTubeCookies(getCookies, toCookieHeader) {
-  // native backends from @steipete/sweet-cookie
   console.log(
     "🔍 Scanning default browsers (Chrome, Edge, Firefox, Safari)...",
   );
   let result = await getCookies({
     url:
       "https://music.youtube.com" &&
-      "https://www.youtube.com" &&
-      "https://youtube.com",
+      "https://youtube.com" &&
+      "https://www.youtube.com",
     browsers: ["chrome", "edge", "firefox", "safari"],
   });
 
@@ -39,15 +61,14 @@ async function extractYouTubeCookies(getCookies, toCookieHeader) {
     return rawCookie;
   }
 
-  // macOS specific Brave/Arc targeting if on Darwin
   if (process.platform === "darwin") {
     console.log("🔍 Scanning macOS Brave/Arc installations...");
     for (const bg of ["brave", "arc"]) {
       result = await getCookies({
         url:
           "https://music.youtube.com" &&
-          "https://www.youtube.com" &&
-          "https://youtube.com",
+          "https://youtube.com" &&
+          "https://www.youtube.com",
         browsers: ["chrome"],
         chromiumBrowser: bg,
       });
@@ -59,7 +80,6 @@ async function extractYouTubeCookies(getCookies, toCookieHeader) {
     }
   }
 
-  // specific profile paths Windows/Linux/macOS
   const extraProfiles = await getExtraChromiumProfiles();
 
   for (const item of extraProfiles) {
@@ -68,8 +88,8 @@ async function extractYouTubeCookies(getCookies, toCookieHeader) {
       result = await getCookies({
         url:
           "https://music.youtube.com" &&
-          "https://www.youtube.com" &&
-          "https://youtube.com",
+          "https://youtube.com" &&
+          "https://www.youtube.com",
         browsers: ["chrome"],
         chromeProfile: item.path,
         chromiumBrowser: item.chromiumBrowser,
@@ -92,14 +112,13 @@ async function selectCsvFile() {
   const csvFiles = allFiles.filter((file) =>
     file.toLowerCase().endsWith(".csv"),
   );
-  // =0
+
   if (csvFiles.length === 0) {
     throw new Error(
       `No .csv files found in the current directory (${currentDir}).`,
     );
   }
 
-  // =1
   if (csvFiles.length === 1) {
     console.log(
       `\n📄 Found exactly one CSV file. Auto-selecting: ${csvFiles[0]}`,
@@ -107,7 +126,6 @@ async function selectCsvFile() {
     return { path: path.join(currentDir, csvFiles[0]), filename: csvFiles[0] };
   }
 
-  // >=2
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -145,6 +163,9 @@ async function restorePlaylist() {
 
     const selectedCsv = await selectCsvFile();
     const csvPath = selectedCsv.path;
+
+    const csvDirectory = path.dirname(csvPath);
+    const stateFilePath = path.join(csvDirectory, "restore_state.json");
 
     console.log("🍪 Extracting YouTube Music session cookies...");
     const USER_COOKIE = await extractYouTubeCookies(getCookies, toCookieHeader);
@@ -189,9 +210,10 @@ async function restorePlaylist() {
     });
 
     const total = videoIds.length;
-    return console.log(`📂 Found ${total} tracks. Initializing...`); // return for testing, not actually making a playlist
+    console.log(
+      `\n📂 Found ${total} tracks. Initializing playlist creation...`,
+    );
 
-    // Create Playlist with first batch
     const firstBatch = videoIds.slice(0, BATCH_SIZE);
     const createRes = await fetch(
       "https://music.youtube.com/youtubei/v1/playlist/create",
@@ -213,7 +235,34 @@ async function restorePlaylist() {
     const playlistId = createData.playlistId;
     console.log(`✨ Playlist Created! (ID: ${playlistId})`);
 
-    // Batch add with random delays
+    const updatedTitle = `Restored Library Backup - ${playlistId}`;
+    console.log(`✏️ Updating playlist title to: "${updatedTitle}"...`);
+    await fetch("https://music.youtube.com/youtubei/v1/browse/edit_playlist", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        context: baseContext,
+        playlistId,
+        actions: [
+          {
+            action: "ACTION_SET_PLAYLIST_NAME",
+            playlistName: updatedTitle,
+          },
+        ],
+      }),
+    });
+
+    let tracksAdded = Math.min(BATCH_SIZE, total);
+    saveState(stateFilePath, selectedCsv.filename, {
+      playlistId: playlistId,
+      tracksAdded: tracksAdded,
+      totalTracks: total,
+      completed: tracksAdded === total,
+      lastUpdated: new Date().toISOString(),
+    });
+
+    console.log(`\n🚀 Initial batch added [${tracksAdded}/${total}].`);
+
     for (let i = BATCH_SIZE; i < total; i += BATCH_SIZE) {
       const chunk = videoIds.slice(i, i + BATCH_SIZE);
       const actions = chunk.map((id) => ({
@@ -221,7 +270,7 @@ async function restorePlaylist() {
         addedVideoId: id,
       }));
 
-      const editRes = await fetch(
+      await fetch(
         "https://music.youtube.com/youtubei/v1/browse/edit_playlist",
         {
           method: "POST",
@@ -230,21 +279,33 @@ async function restorePlaylist() {
         },
       );
 
-      console.log(
-        `🚀 Progress: [${Math.min(i + BATCH_SIZE, total)}/${total}] added.`,
-      );
+      tracksAdded = Math.min(i + BATCH_SIZE, total);
 
-      // Random delay between 5 to 30 seconds to avoid rate limits
-      const randomDelay = Math.floor(Math.random() * (30000 - 5000 + 1) + 5000);
-      console.log(
-        `⏱️ Waiting for ${randomDelay / 1000} seconds before next batch...`,
-      );
-      await new Promise((r) => setTimeout(r, randomDelay));
+      saveState(stateFilePath, selectedCsv.filename, {
+        playlistId: playlistId,
+        tracksAdded: tracksAdded,
+        totalTracks: total,
+        completed: tracksAdded === total,
+        lastUpdated: new Date().toISOString(),
+      });
+
+      console.log(`🚀 Progress: [${tracksAdded}/${total}] added.`);
+
+      if (tracksAdded < total) {
+        const randomDelay = Math.floor(
+          Math.random() * (30000 - 5000 + 1) + 5000,
+        );
+        console.log(`⏱️ Waiting ${randomDelay / 1000}s before next batch...`);
+        await new Promise((r) => setTimeout(r, randomDelay));
+      }
     }
 
-    console.log("\n🎊 Restore Complete!");
+    console.log("\n🎊 Playlist restoration complete from 0 to 100%!");
   } catch (err) {
-    console.error("❌ Script Error:", err.message);
+    console.error("\n❌ Script Interrupted:", err.message);
+    console.log(
+      "💡 You can safely resume this progress later by running 'node src/resumer.js'",
+    );
   }
 }
 
