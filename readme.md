@@ -2,6 +2,9 @@
 
 Automated tool to convert CSV song exports into YouTube Music playlists with batch processing and automatic state saving.
 
+Chrome, Edge, Safari and Firefox are natively supported.
+brave, vivaldi and opera/gx MAY not work on linux (try anyways)
+
 ---
 
 ## 1. Installation
