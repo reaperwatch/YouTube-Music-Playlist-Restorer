@@ -6,7 +6,7 @@ Automated tool to convert CSV song exports into YouTube Music playlists with bat
 
 ## 1. Installation
 
-Ensure you have **Node.js** installed, then run (inside the youtubeApi folder):
+Ensure you have **Node.js** installed, then run (inside the youtubeApi folder, for all scripts as well!):
 
 ```bash
 npm install
