@@ -21,12 +21,15 @@ function getAuthHeader(cookieStr) {
 const { getExtraChromiumProfiles } = require("./browser-paths");
 
 async function extractYouTubeCookies(getCookies, toCookieHeader) {
-  // native backends
+  // native backends from @steipete/sweet-cookie
   console.log(
     "🔍 Scanning default browsers (Chrome, Edge, Firefox, Safari)...",
   );
   let result = await getCookies({
-    url: "https://music.youtube.com",
+    url:
+      "https://music.youtube.com" &&
+      "https://www.youtube.com" &&
+      "https://youtube.com",
     browsers: ["chrome", "edge", "firefox", "safari"],
   });
 
@@ -41,7 +44,10 @@ async function extractYouTubeCookies(getCookies, toCookieHeader) {
     console.log("🔍 Scanning macOS Brave/Arc installations...");
     for (const bg of ["brave", "arc"]) {
       result = await getCookies({
-        url: "https://music.youtube.com",
+        url:
+          "https://music.youtube.com" &&
+          "https://www.youtube.com" &&
+          "https://youtube.com",
         browsers: ["chrome"],
         chromiumBrowser: bg,
       });
@@ -54,15 +60,19 @@ async function extractYouTubeCookies(getCookies, toCookieHeader) {
   }
 
   // specific profile paths Windows/Linux/macOS
-  const extraProfiles = getExtraChromiumProfiles();
+  const extraProfiles = await getExtraChromiumProfiles();
 
   for (const item of extraProfiles) {
-    console.log(`🔍 Checking profile: ${item.name}...`);
+    console.log(`🔍 Checking profile: ${item.name} in ${item.path}...`);
     try {
       result = await getCookies({
-        url: "https://music.youtube.com",
+        url:
+          "https://music.youtube.com" &&
+          "https://www.youtube.com" &&
+          "https://youtube.com",
         browsers: ["chrome"],
         chromeProfile: item.path,
+        chromiumBrowser: item.chromiumBrowser,
       });
       rawCookie = result.cookies ? toCookieHeader(result.cookies) : "";
       if (rawCookie.includes("SAPISID=")) {
@@ -142,7 +152,7 @@ async function restorePlaylist() {
     if (!USER_COOKIE) {
       throw new Error(
         "Could not find an active YouTube Music session with SAPISID cookie. " +
-          "Make sure you are logged into https://music.youtube.com in your browser. (and keep the browser closed while running this script)",
+          "Make sure you are logged into https://music.youtube.com in your browser (or youtube.com if music won't work in the script). (and keep the browser closed while running this script)",
       );
     }
     const authHeader = getAuthHeader(USER_COOKIE);
@@ -179,7 +189,7 @@ async function restorePlaylist() {
     });
 
     const total = videoIds.length;
-    console.log(`📂 Found ${total} tracks. Initializing...`);
+    return console.log(`📂 Found ${total} tracks. Initializing...`); // return for testing, not actually making a playlist
 
     // Create Playlist with first batch
     const firstBatch = videoIds.slice(0, BATCH_SIZE);
