@@ -18,7 +18,7 @@ npm install
 ## 2. Setup
 
 1. **Log in:** Make sure you are logged into [YouTube Music](https://music.youtube.com) in your web browser (and close the browser before running the scripts).
-2. **Add CSVs:** Drop your `.csv` file(s) into the root directory of this project.
+2. **Add CSVs:** Drop your `.csv` file(s) into the youtubeApi folder of this project.
 
 ---
 
@@ -26,7 +26,7 @@ npm install
 
 ### Create a New Playlist
 
-Run the main script to select a CSV, create the YouTube playlist, and automatically batch-add all tracks:
+Run the main script to select a CSV, create the YouTube playlist, and automatically batch add all tracks:
 
 ```bash
 node .
