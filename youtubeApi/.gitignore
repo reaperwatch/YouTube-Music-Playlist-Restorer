@@ -2,3 +2,4 @@ node_modules/
 *.csv
 test.js
 restore_state.json
+cookies.txt
