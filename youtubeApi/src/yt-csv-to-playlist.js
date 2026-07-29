@@ -48,10 +48,8 @@ async function extractYouTubeCookies(getCookies, toCookieHeader) {
     "🔍 Scanning default browsers (Chrome, Edge, Firefox, Safari)...",
   );
   let result = await getCookies({
-    url:
-      "https://music.youtube.com" &&
-      "https://youtube.com" &&
-      "https://www.youtube.com",
+    url: "https://music.youtube.com",
+    origins: ["https://music.youtube.com", "https://youtube.com"],
     browsers: ["chrome", "edge", "firefox", "safari"],
   });
 
@@ -65,10 +63,8 @@ async function extractYouTubeCookies(getCookies, toCookieHeader) {
     console.log("🔍 Scanning macOS Brave/Arc installations...");
     for (const bg of ["brave", "arc"]) {
       result = await getCookies({
-        url:
-          "https://music.youtube.com" &&
-          "https://youtube.com" &&
-          "https://www.youtube.com",
+        url: "https://music.youtube.com",
+        origins: ["https://music.youtube.com", "https://youtube.com"],
         browsers: ["chrome"],
         chromiumBrowser: bg,
       });
@@ -86,10 +82,8 @@ async function extractYouTubeCookies(getCookies, toCookieHeader) {
     console.log(`🔍 Checking profile: ${item.name} in ${item.path}...`);
     try {
       result = await getCookies({
-        url:
-          "https://music.youtube.com" &&
-          "https://youtube.com" &&
-          "https://www.youtube.com",
+        url: "https://music.youtube.com",
+        origins: ["https://music.youtube.com", "https://youtube.com"],
         browsers: ["chrome"],
         chromeProfile: item.path,
         chromiumBrowser: item.chromiumBrowser,
