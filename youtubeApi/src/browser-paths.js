@@ -120,7 +120,7 @@ async function getExtraChromiumProfiles() {
   const platform = process.platform;
   const config = OS_CONFIGS[platform];
 
-  if (!config) return []; // Unsupported OS
+  if (!config) return [];
 
   const browsers = config.getBrowsers(config);
   const detectedProfiles = [];

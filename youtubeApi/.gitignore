@@ -3,3 +3,5 @@ node_modules/
 test.js
 restore_state.json
 cookies.txt
+config.json
+spotify-uploader.js

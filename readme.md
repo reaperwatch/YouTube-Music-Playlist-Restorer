@@ -3,7 +3,7 @@
 Automated tool to convert CSV song exports into YouTube Music playlists with batch processing and automatic state saving.
 
 Chrome, Edge, Safari and Firefox are natively supported.
-brave, vivaldi and opera/gx MAY not work on linux (try anyways)
+brave, vivaldi and opera/gx MAY not work on linux (try anyways, stop using opera please)
 
 ---
 
@@ -20,7 +20,7 @@ npm install
 
 ## 2. Setup
 
-1. **Log in:** Make sure you are logged into [YouTube Music](https://music.youtube.com) in your web browser (and close the browser before running the scripts).
+1. **Log in:** Make sure you are logged into [YouTube Music](https://music.youtube.com) or [YouTube](https://youtube.com) on the browser. Specifically in your web browser (and close the browser before running the scripts).
 2. **Add CSVs:** Drop your `.csv` file(s) into the youtubeApi folder of this project.
 
 ---
