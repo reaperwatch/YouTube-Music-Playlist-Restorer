@@ -1,7 +1,9 @@
 const fs = require("fs");
 const readline = require("readline/promises");
 const { getExtraChromiumProfiles } = require("./browser-paths");
-const { Innertube } = require("youtubei.js");
+const { Innertube, Log } = require("youtubei.js");
+
+Log.setLevel(Log.Level.NONE);
 
 function escapeCsv(text) {
   if (!text) return '""';
