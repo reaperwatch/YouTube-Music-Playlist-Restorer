@@ -30,14 +30,14 @@ npm install
 
 ### Export a Playlist to CSV
 
-Run the exporter script to scrape an existing YouTube Music playlist and save it as a local CSV file containing the title, artist, URL, and video ID:
+Run the exporter script to scrape an existing YouTube playlist and save it as a local CSV file containing the title, artist, URL, and video ID:
 
 ```bash
 node src/yt-to-csv.js
 
 ```
 
-- The script will prompt you to enter the YouTube Music Playlist URL or ID.
+- The script will prompt you to enter the YouTube Playlist URL or ID.
 
 - It will automatically paginate through the playlist and save the output as `Internal_Export_<ID>.csv`.
 
