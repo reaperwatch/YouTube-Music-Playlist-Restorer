@@ -1,15 +1,15 @@
-# YouTube Music Playlist Restorer
+# YouTube Music Playlist Exporter & Restorer
 
-Automated tool to convert CSV song exports into YouTube Music playlists with batch processing and automatic state saving.
+Automated tools to export YouTube Music playlists to CSV format, and to convert CSV song exports back into YouTube Music playlists with batch processing and automatic state saving.
 
 Chrome, Edge, Safari and Firefox are natively supported.
-brave, vivaldi and opera/gx MAY not work on linux (try anyways, stop using opera please)
+Brave, Vivaldi, and Opera/GX MAY not work on Linux (try anyways, stop using Opera please).
 
 ---
 
 ## 1. Installation
 
-Ensure you have **Node.js** installed, then run (inside the youtubeApi folder, for all scripts as well!):
+Ensure you have **Node.js** installed with npm, then run (inside the `youtubeApi` folder, for all scripts as well!):
 
 ```bash
 npm install
@@ -20,12 +20,26 @@ npm install
 
 ## 2. Setup
 
-1. **Log in:** Make sure you are logged into [YouTube Music](https://music.youtube.com) or [YouTube](https://youtube.com) on the browser. Specifically in your web browser (and close the browser before running the scripts).
-2. **Add CSVs:** Drop your `.csv` file(s) into the youtubeApi folder of this project.
+1. **Log in:** Make sure you are logged into [YouTube Music](https://music.youtube.com) or [YouTube](https://youtube.com) on the browser.
+
+2. **Add CSVs:** If you are restoring a playlist, drop your `.csv` file(s) into the `youtubeApi` folder of this project.
 
 ---
 
 ## 3. Usage
+
+### Export a Playlist to CSV
+
+Run the exporter script to scrape an existing YouTube Music playlist and save it as a local CSV file containing the title, artist, URL, and video ID:
+
+```bash
+node src/yt-to-csv.js
+
+```
+
+- The script will prompt you to enter the YouTube Music Playlist URL or ID.
+
+- It will automatically paginate through the playlist and save the output as `Internal_Export_<ID>.csv`.
 
 ### Create a New Playlist
 
@@ -36,12 +50,20 @@ node .
 
 ```
 
-- _If multiple CSVs exist, you'll be prompted to pick one._
-- _Progress and playlist state are automatically updated in `restore_state.json` after every batch._
+or
+
+```bash
+node src/yt-csv-to-playlist.js
+
+```
+
+- If multiple CSVs exist, you'll be prompted to pick one.
+
+- Progress and playlist state are automatically updated in `restore_state.json` after every batch.
 
 ### Resume Interrupted Tasks
 
-If your script crashes, terminal closes, or rate limits stop the process, resume anytime from where you left off without creating duplicate playlists:
+If your script crashes, the terminal closes, or rate limits stop the process, resume anytime from where you left off without creating duplicate playlists:
 
 ```bash
 node src/resumer.js

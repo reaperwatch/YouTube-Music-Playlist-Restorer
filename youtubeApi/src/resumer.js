@@ -147,12 +147,6 @@ async function resumeRestore() {
     const { filename: csvFilename, data: stateData } = targetState;
     const csvPath = path.join(currentDir, csvFilename);
 
-    if (!fs.existsSync(csvPath)) {
-      throw new Error(
-        `The CSV file '${csvFilename}' is missing from this directory!`,
-      );
-    }
-
     const { getCookies, toCookieHeader } =
       await import("@steipete/sweet-cookie");
     console.log("🍪 Extracting YouTube Music session cookies...");
@@ -177,17 +171,35 @@ async function resumeRestore() {
       client: { clientName: "WEB_REMIX", clientVersion: "1.20260318.00.00" },
     };
 
-    const videoIds = [];
-    await new Promise((resolve, reject) => {
-      fs.createReadStream(csvPath)
-        .pipe(csv())
-        .on("data", (row) => {
-          const idKey = Object.keys(row).find((key) => key.includes("ID"));
-          if (idKey && row[idKey]) videoIds.push(row[idKey].trim());
-        })
-        .on("end", resolve)
-        .on("error", reject);
-    });
+    let videoIds = [];
+
+    if (
+      stateData.resolvedVideoIds &&
+      Array.isArray(stateData.resolvedVideoIds)
+    ) {
+      console.log(`\n📂 Found resolved video IDs in state file.`);
+      videoIds = stateData.resolvedVideoIds;
+    } else {
+      if (!fs.existsSync(csvPath)) {
+        throw new Error(
+          `The CSV file '${csvFilename}' is missing from this directory, and no cached IDs were found!`,
+        );
+      }
+
+      console.log(
+        `\n📂 State file is missing 'resolvedVideoIds'. Falling back to parsing CSV...`,
+      );
+      await new Promise((resolve, reject) => {
+        fs.createReadStream(csvPath)
+          .pipe(csv())
+          .on("data", (row) => {
+            const idKey = Object.keys(row).find((key) => key.includes("ID"));
+            if (idKey && row[idKey]) videoIds.push(row[idKey].trim());
+          })
+          .on("end", resolve)
+          .on("error", reject);
+      });
+    }
 
     const total = videoIds.length;
     let tracksAdded = stateData.tracksAdded;
@@ -232,6 +244,7 @@ async function resumeRestore() {
         totalTracks: total,
         completed: tracksAdded === total,
         lastUpdated: new Date().toISOString(),
+        resolvedVideoIds: videoIds,
       });
 
       console.log(`🚀 Progress: [${tracksAdded}/${total}] tracks added...`);

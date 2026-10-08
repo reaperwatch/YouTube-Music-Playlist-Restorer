@@ -4,8 +4,36 @@ const os = require("os");
 const csv = require("csv-parser");
 const crypto = require("crypto");
 const readline = require("readline/promises");
+const { Innertube } = require("youtubei.js");
 
 const BATCH_SIZE = 20; // Number of videos per batch request
+
+let innertubeInstance = null;
+
+async function getInnertube() {
+  if (!innertubeInstance) {
+    innertubeInstance = await Innertube.create();
+  }
+  return innertubeInstance;
+}
+
+async function searchVideoId(query) {
+  try {
+    const yt = await getInnertube();
+    const searchResults = await yt.music.search(query, { type: "song" });
+    const topSong = searchResults.songs?.contents?.[0];
+
+    if (topSong?.id) {
+      return topSong.id;
+    }
+
+    const generalSearch = await yt.search(query);
+    const topVideo = generalSearch.videos?.[0];
+    return topVideo?.id || null;
+  } catch (err) {
+    return null;
+  }
+}
 
 function saveState(filePath, csvFilename, data) {
   let allStates = {};
@@ -160,6 +188,7 @@ async function restorePlaylist() {
 
     const csvDirectory = path.dirname(csvPath);
     const stateFilePath = path.join(csvDirectory, "restore_state.json");
+    const cachePath = path.join(csvDirectory, "search_cache.json");
 
     console.log("🍪 Extracting YouTube Music session cookies...");
     const USER_COOKIE = await extractYouTubeCookies(getCookies, toCookieHeader);
@@ -188,24 +217,112 @@ async function restorePlaylist() {
       client: { clientName: "WEB_REMIX", clientVersion: "1.20260318.00.00" },
     };
 
-    const videoIds = [];
+    const rows = [];
     await new Promise((resolve, reject) => {
       fs.createReadStream(csvPath)
         .pipe(csv())
-        .on("data", (row) => {
-          const idKey = Object.keys(row).find((key) => key.includes("ID"));
-
-          if (idKey && row[idKey]) {
-            videoIds.push(row[idKey].trim());
-          }
-        })
+        .on("data", (row) => rows.push(row))
         .on("end", resolve)
         .on("error", reject);
     });
 
-    const total = videoIds.length;
     console.log(
-      `\n📂 Found ${total} tracks. Initializing playlist creation...`,
+      `\n📂 Parsed ${rows.length} rows from CSV. Processing tracks...`,
+    );
+
+    let searchCache = {};
+    if (fs.existsSync(cachePath)) {
+      try {
+        searchCache = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+      } catch (_) {
+        searchCache = {};
+      }
+    }
+
+    let liveSearchCount = 0;
+    const videoIds = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const idKey = Object.keys(row).find(
+        (key) => key.includes("ID") && !key.toLowerCase().includes("uri"),
+      );
+
+      let videoId = idKey && row[idKey] ? row[idKey].trim() : null;
+
+      if (!videoId) {
+        const searchTerms = [];
+
+        const artistKey = Object.keys(row).find((k) =>
+          /artist|channel|creator/i.test(k),
+        );
+        if (artistKey && row[artistKey] && row[artistKey].trim()) {
+          const cleanArtist = row[artistKey].trim().replace(/;/g, ", ");
+          searchTerms.push(cleanArtist);
+        }
+
+        const titleKey = Object.keys(row).find(
+          (k) => /title|track name|song name/i.test(k) && !/uri/i.test(k),
+        );
+        if (titleKey && row[titleKey] && row[titleKey].trim()) {
+          searchTerms.push(row[titleKey].trim());
+        }
+
+        const searchQuery = searchTerms.join(" - ");
+
+        if (searchQuery) {
+          if (Object.prototype.hasOwnProperty.call(searchCache, searchQuery)) {
+            videoId = searchCache[searchQuery];
+            if (videoId) {
+              console.log(
+                `⚡ [${i + 1}/${rows.length}] Cached: "${searchQuery}" -> ${videoId}`,
+              );
+            }
+          } else {
+            console.log(
+              `🔍 [${i + 1}/${rows.length}] Searching YT Music for: "${searchQuery}"...`,
+            );
+            videoId = await searchVideoId(searchQuery);
+
+            if (videoId) {
+              console.log(`   ✅ Resolved: ${videoId}`);
+              searchCache[searchQuery] = videoId;
+            } else {
+              console.log(`   ⚠️ No match found for: "${searchQuery}"`);
+              searchCache[searchQuery] = null;
+            }
+
+            fs.writeFileSync(
+              cachePath,
+              JSON.stringify(searchCache, null, 2),
+              "utf8",
+            );
+            liveSearchCount++;
+
+            const jitter = Math.floor(Math.random() * 1500) + 1500;
+            await new Promise((r) => setTimeout(r, jitter));
+
+            if (liveSearchCount % 25 === 0) {
+              console.log(
+                "⏱️ Taking a 15-second cooldown pause to respect rate limits...",
+              );
+              await new Promise((r) => setTimeout(r, 15000));
+            }
+          }
+        }
+      }
+
+      if (videoId) {
+        videoIds.push(videoId);
+      }
+    }
+
+    const total = videoIds.length;
+    if (total === 0) {
+      throw new Error("No valid video IDs found or resolved.");
+    }
+    console.log(
+      `\n📂 Found ${total} valid tracks. Initializing playlist creation...`,
     );
 
     const firstBatch = videoIds.slice(0, BATCH_SIZE);
@@ -247,12 +364,14 @@ async function restorePlaylist() {
     });
 
     let tracksAdded = Math.min(BATCH_SIZE, total);
+
     saveState(stateFilePath, selectedCsv.filename, {
       playlistId: playlistId,
       tracksAdded: tracksAdded,
       totalTracks: total,
       completed: tracksAdded === total,
       lastUpdated: new Date().toISOString(),
+      resolvedVideoIds: videoIds,
     });
 
     console.log(`\n🚀 Initial batch added [${tracksAdded}/${total}].`);
@@ -281,6 +400,7 @@ async function restorePlaylist() {
         totalTracks: total,
         completed: tracksAdded === total,
         lastUpdated: new Date().toISOString(),
+        resolvedVideoIds: videoIds,
       });
 
       console.log(`🚀 Progress: [${tracksAdded}/${total}] added.`);
@@ -294,7 +414,7 @@ async function restorePlaylist() {
       }
     }
 
-    console.log("\n🎊 Playlist restoration complete from 0 to 100%!");
+    console.log("\n🎊 Playlist restoration complete! Check your account.");
   } catch (err) {
     console.error("\n❌ Script Interrupted:", err.message);
     console.log(
