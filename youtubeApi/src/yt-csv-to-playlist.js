@@ -27,9 +27,7 @@ async function searchVideoId(query) {
       return topSong.id;
     }
 
-    const generalSearch = await yt.search(query);
-    const topVideo = generalSearch.videos?.[0];
-    return topVideo?.id || null;
+    return null;
   } catch (err) {
     return null;
   }
@@ -180,6 +178,70 @@ async function selectCsvFile() {
   }
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function addBatchChecked(
+  url,
+  getHeaders,
+  baseContext,
+  playlistId,
+  chunk,
+) {
+  const actions = chunk.map((id) => ({
+    action: "ACTION_ADD_VIDEO",
+    addedVideoId: id,
+    dedupeOption: "DEDUPE_OPTION_SKIP",
+  }));
+
+  const MAX_ATTEMPTS = 5;
+  let reason = "unknown";
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: getHeaders(),
+        body: JSON.stringify({ context: baseContext, playlistId, actions }),
+      });
+
+      if (res.status === 401 || res.status === 403) {
+        return {
+          ok: false,
+          fatal: true,
+          reason: `HTTP ${res.status} (session/cookies rejected)`,
+        };
+      }
+
+      let data = null;
+      try {
+        data = await res.json();
+      } catch (_) {}
+
+      if (res.ok && data && data.status === "STATUS_SUCCEEDED") {
+        return { ok: true };
+      }
+
+      reason = `HTTP ${res.status}, status=${data?.status ?? "n/a"}`;
+      console.log(
+        `   ⚠️ Batch rejected (${reason}). Attempt ${attempt}/${MAX_ATTEMPTS}`,
+      );
+      if (data && !data.status) {
+        console.log("   Response:", JSON.stringify(data).slice(0, 300));
+      }
+    } catch (err) {
+      reason = `network error: ${err.message}`;
+      console.log(`   ⚠️ ${reason}. Attempt ${attempt}/${MAX_ATTEMPTS}`);
+    }
+
+    if (attempt < MAX_ATTEMPTS) {
+      const wait = 30000 * 2 ** (attempt - 1); // 30s, 60s, 120s, 240s
+      console.log(`   ⏱️ Retrying in ${wait / 1000}s...`);
+      await sleep(wait);
+    }
+  }
+  return { ok: false, fatal: false, reason };
+}
+
 async function restorePlaylist() {
   try {
     const { getCookies, toCookieHeader } =
@@ -191,6 +253,7 @@ async function restorePlaylist() {
     const csvDirectory = path.dirname(csvPath);
     const stateFilePath = path.join(csvDirectory, "restore_state.json");
     const cachePath = path.join(csvDirectory, "search_cache.json");
+    const missingTracksPath = path.join(csvDirectory, "missing_tracks.txt");
 
     const rows = [];
     await new Promise((resolve, reject) => {
@@ -216,6 +279,7 @@ async function restorePlaylist() {
 
     let liveSearchCount = 0;
     const videoIds = [];
+    const missingTracks = [];
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
@@ -225,70 +289,101 @@ async function restorePlaylist() {
 
       let videoId = idKey && row[idKey] ? row[idKey].trim() : null;
 
-      if (!videoId) {
-        const searchTerms = [];
+      if (videoId) {
+        videoIds.push(videoId);
+        continue;
+      }
 
-        const artistKey = Object.keys(row).find((k) =>
-          /artist|channel|creator/i.test(k),
+      const searchTerms = [];
+      const artistKey = Object.keys(row).find((k) =>
+        /artist|channel|creator/i.test(k),
+      );
+      if (artistKey && row[artistKey] && row[artistKey].trim()) {
+        const cleanArtist = row[artistKey].trim().replace(/;/g, ", ");
+        searchTerms.push(cleanArtist);
+      }
+
+      const titleKey = Object.keys(row).find(
+        (k) => /title|track name|song name/i.test(k) && !/uri/i.test(k),
+      );
+      if (titleKey && row[titleKey] && row[titleKey].trim()) {
+        searchTerms.push(row[titleKey].trim());
+      }
+
+      const searchQuery = searchTerms.join(" - ");
+
+      if (!searchQuery) {
+        const missingEntry = `Row ${i + 1}: (Missing searchable title/artist fields)`;
+        missingTracks.push(missingEntry);
+        fs.writeFileSync(
+          missingTracksPath,
+          missingTracks.join("\n") + "\n",
+          "utf8",
         );
-        if (artistKey && row[artistKey] && row[artistKey].trim()) {
-          const cleanArtist = row[artistKey].trim().replace(/;/g, ", ");
-          searchTerms.push(cleanArtist);
+        continue;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(searchCache, searchQuery)) {
+        videoId = searchCache[searchQuery];
+        if (videoId) {
+          console.log(
+            `⚡ [${i + 1}/${rows.length}] Cached: "${searchQuery}" -> ${videoId}`,
+          );
+        }
+      } else {
+        console.log(
+          `🔍 [${i + 1}/${rows.length}] Searching YT Music for: "${searchQuery}"...`,
+        );
+        videoId = await searchVideoId(searchQuery);
+
+        if (videoId) {
+          console.log(`   ✅ Resolved: ${videoId}`);
+          searchCache[searchQuery] = videoId;
+        } else {
+          console.log(`   ⚠️ No match found for: "${searchQuery}"`);
+          searchCache[searchQuery] = null;
         }
 
-        const titleKey = Object.keys(row).find(
-          (k) => /title|track name|song name/i.test(k) && !/uri/i.test(k),
+        fs.writeFileSync(
+          cachePath,
+          JSON.stringify(searchCache, null, 2),
+          "utf8",
         );
-        if (titleKey && row[titleKey] && row[titleKey].trim()) {
-          searchTerms.push(row[titleKey].trim());
-        }
+        liveSearchCount++;
 
-        const searchQuery = searchTerms.join(" - ");
+        const jitter = Math.floor(Math.random() * 1500) + 1500;
+        await new Promise((r) => setTimeout(r, jitter));
 
-        if (searchQuery) {
-          if (Object.prototype.hasOwnProperty.call(searchCache, searchQuery)) {
-            videoId = searchCache[searchQuery];
-            if (videoId) {
-              console.log(
-                `⚡ [${i + 1}/${rows.length}] Cached: "${searchQuery}" -> ${videoId}`,
-              );
-            }
-          } else {
-            console.log(
-              `🔍 [${i + 1}/${rows.length}] Searching YT Music for: "${searchQuery}"...`,
-            );
-            videoId = await searchVideoId(searchQuery);
-
-            if (videoId) {
-              console.log(`   ✅ Resolved: ${videoId}`);
-              searchCache[searchQuery] = videoId;
-            } else {
-              console.log(`   ⚠️ No match found for: "${searchQuery}"`);
-              searchCache[searchQuery] = null;
-            }
-
-            fs.writeFileSync(
-              cachePath,
-              JSON.stringify(searchCache, null, 2),
-              "utf8",
-            );
-            liveSearchCount++;
-
-            const jitter = Math.floor(Math.random() * 1500) + 1500;
-            await new Promise((r) => setTimeout(r, jitter));
-
-            if (liveSearchCount % 25 === 0) {
-              console.log(
-                "⏱️ Taking a 15-second cooldown pause to respect rate limits...",
-              );
-              await new Promise((r) => setTimeout(r, 15000));
-            }
-          }
+        if (liveSearchCount % 25 === 0) {
+          console.log(
+            "⏱️ Taking a 15-second cooldown pause to respect rate limits...",
+          );
+          await new Promise((r) => setTimeout(r, 15000));
         }
       }
 
       if (videoId) {
         videoIds.push(videoId);
+      } else {
+        missingTracks.push(searchQuery);
+        fs.writeFileSync(
+          missingTracksPath,
+          missingTracks.join("\n") + "\n",
+          "utf8",
+        );
+      }
+    }
+
+    if (missingTracks.length > 0) {
+      console.log(
+        `\n⚠️ Summary: ${missingTracks.length} track(s) could not be found on YouTube Music.`,
+      );
+      console.log(
+        `📄 A readable list has been saved to: ${missingTracksPath}\nLook for the missing tracks in this file and add them manually.`,
+      );
+    } else {
+      if (fs.existsSync(missingTracksPath)) {
+        fs.unlinkSync(missingTracksPath);
       }
     }
 
@@ -374,43 +469,72 @@ async function restorePlaylist() {
     });
 
     let tracksAdded = 0;
+    let confirmedAdded = 0;
+    const failedVideoIds = [];
+    const failedPath = path.join(csvDirectory, "failed_ids.json");
+    const editUrl =
+      "https://music.youtube.com/youtubei/v1/browse/edit_playlist";
 
     for (let i = 0; i < total; i += BATCH_SIZE) {
       const chunk = videoIds.slice(i, i + BATCH_SIZE);
-      const actions = chunk.map((id) => ({
-        action: "ACTION_ADD_VIDEO",
-        addedVideoId: id,
-      }));
 
-      await fetch(
-        "https://music.youtube.com/youtubei/v1/browse/edit_playlist",
-        {
-          method: "POST",
-          headers: getHeaders(),
-          body: JSON.stringify({ context: baseContext, playlistId, actions }),
-        },
+      const result = await addBatchChecked(
+        editUrl,
+        getHeaders,
+        baseContext,
+        playlistId,
+        chunk,
       );
+
+      if (result.ok) {
+        confirmedAdded += chunk.length;
+      } else {
+        failedVideoIds.push(...chunk);
+        fs.writeFileSync(
+          failedPath,
+          JSON.stringify(failedVideoIds, null, 2),
+          "utf8",
+        );
+        console.log(
+          `❌ Batch at [${i + 1}-${i + chunk.length}] FAILED: ${result.reason}`,
+        );
+        if (result.fatal) {
+          throw new Error(
+            `Aborting: ${result.reason}. Log in again and re-run.`,
+          );
+        }
+      }
 
       tracksAdded = Math.min(i + BATCH_SIZE, total);
 
       saveState(stateFilePath, selectedCsv.filename, {
         playlistId: playlistId,
         tracksAdded: tracksAdded,
+        confirmedAdded: confirmedAdded,
+        failedVideoIds: failedVideoIds,
         totalTracks: total,
-        completed: tracksAdded === total,
+        completed: tracksAdded === total && failedVideoIds.length === 0,
         lastUpdated: new Date().toISOString(),
         resolvedVideoIds: videoIds,
       });
 
-      console.log(`🚀 Progress: [${tracksAdded}/${total}] added.`);
+      console.log(
+        `🚀 Progress: [${tracksAdded}/${total}] processed, ${confirmedAdded} confirmed by YouTube.`,
+      );
 
       if (tracksAdded < total) {
         const randomDelay = Math.floor(
           Math.random() * (30000 - 5000 + 1) + 5000,
         );
         console.log(`⏱️ Waiting ${randomDelay / 1000}s before next batch...`);
-        await new Promise((r) => setTimeout(r, randomDelay));
+        await sleep(randomDelay);
       }
+    }
+
+    if (failedVideoIds.length > 0) {
+      console.log(
+        `\n⚠️ ${failedVideoIds.length} track(s) were NOT added. IDs saved to ${failedPath}`,
+      );
     }
 
     console.log("\n🎊 Playlist restoration complete! Check your account.");
