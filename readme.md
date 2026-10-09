@@ -9,7 +9,7 @@ Brave, Vivaldi, and Opera/GX MAY not work on Linux (try anyways, stop using Oper
 
 ## 1. Installation
 
-Ensure you have **Node.js** installed with npm, then run (inside the `youtubeApi` folder, for all scripts as well!):
+Ensure you have **Node.js** installed with npm, then run (MUST BE inside the `youtubeApi` folder first before running it: cd pathto/youtubeApi/, for all scripts as well!):
 
 ```bash
 npm install
