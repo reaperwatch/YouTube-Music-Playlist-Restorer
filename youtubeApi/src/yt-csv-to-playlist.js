@@ -59,7 +59,9 @@ function saveState(filePath, csvFilename, data) {
 }
 
 function getAuthHeader(cookieStr) {
-  const match = cookieStr.match(/SAPISID=([^;]+)/);
+  const match = cookieStr.match(
+    /(?:__Secure-3PAPISID|__Secure-1PAPISID|SAPISID)=([^;]+)/,
+  );
   if (!match) return "";
   const time = Math.floor(Date.now() / 1000);
   const hash = crypto
@@ -82,7 +84,7 @@ async function extractYouTubeCookies(getCookies, toCookieHeader) {
   });
 
   let rawCookie = result.cookies ? toCookieHeader(result.cookies) : "";
-  if (rawCookie.includes("SAPISID=")) {
+  if (rawCookie.includes("SAPISID=") || rawCookie.includes("PAPISID=")) {
     console.log("✅ Authenticated YouTube session found in default browser.");
     return rawCookie;
   }
@@ -97,7 +99,7 @@ async function extractYouTubeCookies(getCookies, toCookieHeader) {
         chromiumBrowser: bg,
       });
       rawCookie = result.cookies ? toCookieHeader(result.cookies) : "";
-      if (rawCookie.includes("SAPISID=")) {
+      if (rawCookie.includes("SAPISID=") || rawCookie.includes("PAPISID=")) {
         console.log(`✅ Authenticated YouTube session found in macOS ${bg}.`);
         return rawCookie;
       }
@@ -117,7 +119,7 @@ async function extractYouTubeCookies(getCookies, toCookieHeader) {
         chromiumBrowser: item.chromiumBrowser,
       });
       rawCookie = result.cookies ? toCookieHeader(result.cookies) : "";
-      if (rawCookie.includes("SAPISID=")) {
+      if (rawCookie.includes("SAPISID=") || rawCookie.includes("PAPISID=")) {
         console.log(`✅ Authenticated YouTube session found in ${item.name}!`);
         return rawCookie;
       }
@@ -189,33 +191,6 @@ async function restorePlaylist() {
     const csvDirectory = path.dirname(csvPath);
     const stateFilePath = path.join(csvDirectory, "restore_state.json");
     const cachePath = path.join(csvDirectory, "search_cache.json");
-
-    console.log("🍪 Extracting YouTube Music session cookies...");
-    const USER_COOKIE = await extractYouTubeCookies(getCookies, toCookieHeader);
-
-    if (!USER_COOKIE) {
-      throw new Error(
-        "Could not find an active YouTube Music session with SAPISID cookie. " +
-          "Make sure you are logged into https://music.youtube.com in your browser (or youtube.com if music won't work in the script). (and keep the browser closed while running this script)",
-      );
-    }
-    const authHeader = getAuthHeader(USER_COOKIE);
-
-    if (!authHeader) throw new Error("Could not find SAPISID in cookie.");
-
-    const headers = {
-      accept: "*/*",
-      "content-type": "application/json",
-      cookie: USER_COOKIE,
-      origin: "https://music.youtube.com",
-      authorization: authHeader,
-      "x-youtube-client-name": "67",
-      "x-youtube-client-version": "1.20260318.00.00",
-    };
-
-    const baseContext = {
-      client: { clientName: "WEB_REMIX", clientVersion: "1.20260318.00.00" },
-    };
 
     const rows = [];
     await new Promise((resolve, reject) => {
@@ -321,27 +296,62 @@ async function restorePlaylist() {
     if (total === 0) {
       throw new Error("No valid video IDs found or resolved.");
     }
+
+    console.log("\n🍪 Extracting fresh YouTube Music session cookies...");
+    const USER_COOKIE = await extractYouTubeCookies(getCookies, toCookieHeader);
+
+    if (!USER_COOKIE) {
+      throw new Error(
+        "Could not find an active YouTube Music session. Make sure you are logged into https://music.youtube.com in your browser.",
+      );
+    }
+
+    if (!getAuthHeader(USER_COOKIE)) {
+      throw new Error("Could not find SAPISID in cookie string.");
+    }
+
+    const getHeaders = () => ({
+      accept: "*/*",
+      "content-type": "application/json",
+      cookie: USER_COOKIE,
+      origin: "https://music.youtube.com",
+      authorization: getAuthHeader(USER_COOKIE),
+      "x-goog-authuser": "0",
+      "x-youtube-client-name": "67",
+      "x-youtube-client-version": "1.20260318.00.00",
+    });
+
+    const baseContext = {
+      client: { clientName: "WEB_REMIX", clientVersion: "1.20260318.00.00" },
+    };
+
     console.log(
-      `\n📂 Found ${total} valid tracks. Initializing playlist creation...`,
+      `📂 Found ${total} valid tracks. Initializing playlist creation...`,
     );
 
-    const firstBatch = videoIds.slice(0, BATCH_SIZE);
     const createRes = await fetch(
       "https://music.youtube.com/youtubei/v1/playlist/create",
       {
         method: "POST",
-        headers,
+        headers: getHeaders(),
         body: JSON.stringify({
           context: baseContext,
           title: "Restored Library Backup",
           privacyStatus: "PRIVATE",
-          videoIds: firstBatch,
+          videoIds: [],
         }),
       },
     );
 
     const createData = await createRes.json();
-    if (!createData.playlistId) throw new Error("Failed to create playlist.");
+
+    if (!createData.playlistId) {
+      console.error(
+        "\n❌ YouTube API Creation Error Payload:",
+        JSON.stringify(createData, null, 2),
+      );
+      throw new Error("Failed to create playlist.");
+    }
 
     const playlistId = createData.playlistId;
     console.log(`✨ Playlist Created! (ID: ${playlistId})`);
@@ -350,7 +360,7 @@ async function restorePlaylist() {
     console.log(`✏️ Updating playlist title to: "${updatedTitle}"...`);
     await fetch("https://music.youtube.com/youtubei/v1/browse/edit_playlist", {
       method: "POST",
-      headers,
+      headers: getHeaders(),
       body: JSON.stringify({
         context: baseContext,
         playlistId,
@@ -363,20 +373,9 @@ async function restorePlaylist() {
       }),
     });
 
-    let tracksAdded = Math.min(BATCH_SIZE, total);
+    let tracksAdded = 0;
 
-    saveState(stateFilePath, selectedCsv.filename, {
-      playlistId: playlistId,
-      tracksAdded: tracksAdded,
-      totalTracks: total,
-      completed: tracksAdded === total,
-      lastUpdated: new Date().toISOString(),
-      resolvedVideoIds: videoIds,
-    });
-
-    console.log(`\n🚀 Initial batch added [${tracksAdded}/${total}].`);
-
-    for (let i = BATCH_SIZE; i < total; i += BATCH_SIZE) {
+    for (let i = 0; i < total; i += BATCH_SIZE) {
       const chunk = videoIds.slice(i, i + BATCH_SIZE);
       const actions = chunk.map((id) => ({
         action: "ACTION_ADD_VIDEO",
@@ -387,7 +386,7 @@ async function restorePlaylist() {
         "https://music.youtube.com/youtubei/v1/browse/edit_playlist",
         {
           method: "POST",
-          headers,
+          headers: getHeaders(),
           body: JSON.stringify({ context: baseContext, playlistId, actions }),
         },
       );

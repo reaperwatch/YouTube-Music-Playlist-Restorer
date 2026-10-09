@@ -20,6 +20,17 @@ function saveState(filePath, csvFilename, data) {
   fs.writeFileSync(filePath, JSON.stringify(allStates, null, 2), "utf8");
 }
 
+function removeStateKey(filePath, csvFilename) {
+  if (!fs.existsSync(filePath)) return;
+  try {
+    const allStates = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (allStates[csvFilename]) {
+      delete allStates[csvFilename];
+      fs.writeFileSync(filePath, JSON.stringify(allStates, null, 2), "utf8");
+    }
+  } catch (e) {}
+}
+
 function getAuthHeader(cookieStr) {
   const match = cookieStr.match(/SAPISID=([^;]+)/);
   if (!match) return "";
@@ -79,28 +90,90 @@ async function extractYouTubeCookies(getCookies, toCookieHeader) {
   return "";
 }
 
-async function selectStateToResume(stateFilePath) {
+async function selectStateToResume(stateFilePath, getHeaders, baseContext) {
   if (!fs.existsSync(stateFilePath)) {
     throw new Error(
       "No restore_state.json found in the current directory. Start a new playlist first!",
     );
   }
 
-  const allStates = JSON.parse(fs.readFileSync(stateFilePath, "utf8"));
+  let allStates = {};
+  try {
+    allStates = JSON.parse(fs.readFileSync(stateFilePath, "utf8"));
+  } catch (e) {
+    throw new Error("Could not parse restore_state.json.");
+  }
 
-  const incompleteStates = Object.entries(allStates).filter(
-    ([filename, data]) => !data.completed,
-  );
+  let stateModified = false;
+  for (const [filename, data] of Object.entries(allStates)) {
+    if (data.completed) {
+      console.log(
+        `🧹 Purging completed entry for '${filename}' from state file...`,
+      );
+      delete allStates[filename];
+      stateModified = true;
+    }
+  }
+
+  if (stateModified) {
+    fs.writeFileSync(stateFilePath, JSON.stringify(allStates, null, 2), "utf8");
+  }
+
+  const incompleteStates = Object.entries(allStates);
 
   if (incompleteStates.length === 0) {
     console.log(
-      "✨ All playlists in your state file are already marked as 100% complete!",
+      "✨ No incomplete playlists found to resume (completed entries were cleaned up).",
     );
     process.exit(0);
   }
 
-  if (incompleteStates.length === 1) {
-    const [filename, data] = incompleteStates[0];
+  console.log("🔍 Verifying active playlists on YouTube...");
+  const validStates = [];
+
+  for (const [filename, data] of incompleteStates) {
+    try {
+      const checkRes = await fetch(
+        "https://music.youtube.com/youtubei/v1/browse/edit_playlist",
+        {
+          method: "POST",
+          headers: getHeaders(),
+          body: JSON.stringify({
+            context: baseContext,
+            playlistId: data.playlistId,
+            actions: [],
+          }),
+        },
+      );
+
+      if (checkRes.status === 404) {
+        console.log(
+          `🗑️ Playlist for '${filename}' (${data.playlistId}) no longer exists on YouTube. Auto-cleaning state...`,
+        );
+        delete allStates[filename];
+        fs.writeFileSync(
+          stateFilePath,
+          JSON.stringify(allStates, null, 2),
+          "utf8",
+        );
+        continue;
+      }
+
+      validStates.push([filename, data]);
+    } catch (err) {
+      validStates.push([filename, data]);
+    }
+  }
+
+  if (validStates.length === 0) {
+    console.log(
+      "✨ No active incomplete playlists remaining (deleted or completed playlists were cleaned up).",
+    );
+    process.exit(0);
+  }
+
+  if (validStates.length === 1) {
+    const [filename, data] = validStates[0];
     console.log(
       `\n📄 Found one incomplete restore: ${filename} (${data.tracksAdded}/${data.totalTracks} tracks). Auto-selecting...`,
     );
@@ -115,7 +188,7 @@ async function selectStateToResume(stateFilePath) {
   console.log(
     "\n📄 Multiple incomplete playlists found. Which one do you want to resume?",
   );
-  incompleteStates.forEach(([filename, data], index) => {
+  validStates.forEach(([filename, data], index) => {
     console.log(
       `  [${index + 1}] ${filename} - Progress: ${data.tracksAdded}/${data.totalTracks}`,
     );
@@ -123,13 +196,13 @@ async function selectStateToResume(stateFilePath) {
 
   while (true) {
     const answer = await rl.question(
-      `\nEnter a number (1-${incompleteStates.length}): `,
+      `\nEnter a number (1-${validStates.length}): `,
     );
     const choice = parseInt(answer.trim(), 10);
 
-    if (!isNaN(choice) && choice >= 1 && choice <= incompleteStates.length) {
+    if (!isNaN(choice) && choice >= 1 && choice <= validStates.length) {
       rl.close();
-      const [filename, data] = incompleteStates[choice - 1];
+      const [filename, data] = validStates[choice - 1];
       console.log(`✅ Selected: ${filename}`);
       return { filename, data };
     } else {
@@ -143,10 +216,6 @@ async function resumeRestore() {
     const currentDir = process.cwd();
     const stateFilePath = path.join(currentDir, "restore_state.json");
 
-    const targetState = await selectStateToResume(stateFilePath);
-    const { filename: csvFilename, data: stateData } = targetState;
-    const csvPath = path.join(currentDir, csvFilename);
-
     const { getCookies, toCookieHeader } =
       await import("@steipete/sweet-cookie");
     console.log("🍪 Extracting YouTube Music session cookies...");
@@ -154,22 +223,31 @@ async function resumeRestore() {
 
     if (!USER_COOKIE)
       throw new Error("Could not find an active YouTube Music session cookie.");
-    const authHeader = getAuthHeader(USER_COOKIE);
-    if (!authHeader) throw new Error("Could not find SAPISID in cookie.");
 
-    const headers = {
+    if (!getAuthHeader(USER_COOKIE))
+      throw new Error("Could not find SAPISID in cookie.");
+
+    const getHeaders = () => ({
       accept: "*/*",
       "content-type": "application/json",
       cookie: USER_COOKIE,
       origin: "https://music.youtube.com",
-      authorization: authHeader,
+      authorization: getAuthHeader(USER_COOKIE),
       "x-youtube-client-name": "67",
       "x-youtube-client-version": "1.20260318.00.00",
-    };
+    });
 
     const baseContext = {
       client: { clientName: "WEB_REMIX", clientVersion: "1.20260318.00.00" },
     };
+
+    const targetState = await selectStateToResume(
+      stateFilePath,
+      getHeaders,
+      baseContext,
+    );
+    const { filename: csvFilename, data: stateData } = targetState;
+    const csvPath = path.join(currentDir, csvFilename);
 
     let videoIds = [];
 
@@ -220,7 +298,7 @@ async function resumeRestore() {
         "https://music.youtube.com/youtubei/v1/browse/edit_playlist",
         {
           method: "POST",
-          headers,
+          headers: getHeaders(),
           body: JSON.stringify({
             context: baseContext,
             playlistId: stateData.playlistId,
@@ -228,6 +306,13 @@ async function resumeRestore() {
           }),
         },
       );
+
+      if (editRes.status === 404) {
+        removeStateKey(stateFilePath, csvFilename);
+        throw new Error(
+          `Playlist '${stateData.playlistId}' was deleted on YouTube. Cleaned up state file entry. Run 'node .' to recreate it.`,
+        );
+      }
 
       if (!editRes.ok) {
         const errorText = await editRes.text();
@@ -238,14 +323,18 @@ async function resumeRestore() {
 
       tracksAdded = Math.min(i + BATCH_SIZE, total);
 
-      saveState(stateFilePath, csvFilename, {
-        playlistId: stateData.playlistId,
-        tracksAdded: tracksAdded,
-        totalTracks: total,
-        completed: tracksAdded === total,
-        lastUpdated: new Date().toISOString(),
-        resolvedVideoIds: videoIds,
-      });
+      if (tracksAdded === total) {
+        removeStateKey(stateFilePath, csvFilename);
+      } else {
+        saveState(stateFilePath, csvFilename, {
+          playlistId: stateData.playlistId,
+          tracksAdded: tracksAdded,
+          totalTracks: total,
+          completed: false,
+          lastUpdated: new Date().toISOString(),
+          resolvedVideoIds: videoIds,
+        });
+      }
 
       console.log(`🚀 Progress: [${tracksAdded}/${total}] tracks added...`);
 
@@ -258,7 +347,9 @@ async function resumeRestore() {
       }
     }
 
-    console.log(`\n🎊 Success! ${csvFilename} has been fully restored.`);
+    console.log(
+      `\n🎊 Success! ${csvFilename} has been fully restored and removed from state tracking.`,
+    );
   } catch (err) {
     console.error("\n❌ Resume Error:", err.message);
   }
