@@ -417,9 +417,15 @@ async function restorePlaylist() {
     console.log("\n🎊 Playlist restoration complete! Check your account.");
   } catch (err) {
     console.error("\n❌ Script Interrupted:", err.message);
-    console.log(
-      "💡 You can safely resume this progress later by running 'node src/resumer.js'",
-    );
+    if (err.message.includes("Failed to create playlist")) {
+      console.log(
+        "💡 Your search progress is safely cached! Run the main script again ('node .') to retry creating the playlist. Do NOT use resumer.js yet.",
+      );
+    } else {
+      console.log(
+        "💡 You can safely resume this progress later by running 'node src/resumer.js'",
+      );
+    }
   }
 }
 
