@@ -5,6 +5,13 @@ const csv = require("csv-parser");
 const crypto = require("crypto");
 const readline = require("readline/promises");
 const { Innertube } = require("youtubei.js");
+const {
+  pickBestSong,
+  expectedSecondsFromRow,
+  formatMissingReport,
+  summarizeSong,
+  MATCHER_VERSION,
+} = require("./track-matcher");
 
 const BATCH_SIZE = 20; // Number of videos per batch request
 
@@ -17,19 +24,82 @@ async function getInnertube() {
   return innertubeInstance;
 }
 
-async function searchVideoId(query) {
+// A cached "no match" from an older version of the matcher is re-checked, not trusted.
+function isStaleMiss(v) {
+  return v === null || (typeof v === "object" && v.v !== MATCHER_VERSION);
+}
+
+const ISRC_PATTERN = /^[A-Z]{2}[A-Z0-9]{3}\d{7}$/;
+
+const isrcHits = new Map();
+
+async function searchVideoId(query, expected) {
+  let searches = 0;
+  const isrcLeads = [];
   try {
     const yt = await getInnertube();
-    const searchResults = await yt.music.search(query, { type: "song" });
-    const topSong = searchResults.songs?.contents?.[0];
 
-    if (topSong?.id) {
-      return topSong.id;
+    if (expected.isrc && ISRC_PATTERN.test(expected.isrc)) {
+      try {
+        const res = await yt.music.search(expected.isrc, { type: "song" });
+        searches++;
+        const songs = res.songs?.contents ?? [];
+        const junkIds = new Set(
+          [...isrcHits]
+            .filter(([, set]) => [...set].some((i) => i !== expected.isrc))
+            .map(([id]) => id),
+        );
+        for (const song of songs.slice(0, 3)) {
+          if (!song?.id) continue;
+          if (!isrcHits.has(song.id)) isrcHits.set(song.id, new Set());
+          isrcHits.get(song.id).add(expected.isrc);
+        }
+        const pick = pickBestSong(songs, expected, { viaIsrc: true, junkIds });
+        if (pick.id)
+          return { ...pick, reason: `ISRC search: ${pick.reason}`, searches };
+        for (const song of songs.slice(0, 2)) {
+          if (song?.id)
+            isrcLeads.push({ ...summarizeSong(song), viaIsrc: true });
+        }
+      } catch (_) {
+        searches++; // ISRC search failed: just use the normal search below
+      }
+      await sleep(Math.floor(Math.random() * 700) + 900);
     }
 
-    return null;
+    const res = await yt.music.search(query, { type: "song" });
+    searches++;
+    const result = pickBestSong(res.songs?.contents ?? [], expected);
+
+    if (!result.id && isrcLeads.length) {
+      const miss = result.miss || {
+        kind: "none",
+        expectedSeconds: expected.seconds || null,
+        candidates: [],
+      };
+      const known = new Set(isrcLeads.map((c) => c.id));
+      miss.candidates = [
+        ...isrcLeads,
+        ...(miss.candidates || []).filter((c) => !known.has(c.id)),
+      ];
+      if (miss.kind === "none") miss.kind = "other";
+      result.miss = miss;
+      if (result.note === "search returned no songs")
+        result.note = "only the ISRC search returned songs";
+    }
+    return { ...result, searches };
   } catch (err) {
-    return null;
+    return {
+      id: null,
+      note: `search error: ${err.message}`,
+      error: true,
+      searches,
+      miss: {
+        kind: "error",
+        expectedSeconds: expected.seconds || null,
+        candidates: [],
+      },
+    };
   }
 }
 
@@ -200,10 +270,18 @@ async function addBatchChecked(
     try {
       const res = await fetch(url, {
         method: "POST",
-        headers: getHeaders(),
+        headers: getHeaders(), // fresh SAPISIDHASH each attempt
         body: JSON.stringify({ context: baseContext, playlistId, actions }),
       });
 
+      if (res.status === 404) {
+        return {
+          ok: false,
+          fatal: true,
+          notFound: true,
+          reason: "playlist not found (404)",
+        };
+      }
       if (res.status === 401 || res.status === 403) {
         return {
           ok: false,
@@ -242,6 +320,78 @@ async function addBatchChecked(
   return { ok: false, fatal: false, reason };
 }
 
+function describeRow(row, index) {
+  const artistKey = Object.keys(row).find((k) =>
+    /artist|channel|creator/i.test(k),
+  );
+  const titleKey = Object.keys(row).find(
+    (k) => /title|track name|song name/i.test(k) && !/uri/i.test(k),
+  );
+  const artist =
+    artistKey && row[artistKey]
+      ? row[artistKey].trim().replace(/;/g, ", ")
+      : "";
+  const title = titleKey && row[titleKey] ? row[titleKey].trim() : "";
+  return [artist, title].filter(Boolean).join(" - ") || `Row ${index + 1}`;
+}
+
+async function askKeepRepeats({
+  totalRows,
+  uniqueCount,
+  repeatedIds,
+  labelById,
+}) {
+  const extra = totalRows - uniqueCount;
+  console.log("\n🔁 Repeated videos found");
+  console.log(
+    `   ${extra} entr${extra === 1 ? "y" : "ies"} in this list ${extra === 1 ? "points" : "point"} to a video that is already in the list`,
+  );
+  console.log(
+    `   (${uniqueCount} different videos out of ${totalRows} total). This is about the`,
+  );
+  console.log(
+    "   exact same YouTube video appearing more than once, NOT about songs with the",
+  );
+  console.log(
+    "   same title. A re-upload or live version is a different video and is never affected.",
+  );
+  console.log("\n   Examples:");
+  for (const [id, count] of repeatedIds.slice(0, 3)) {
+    console.log(`     • ${labelById.get(id) || id}  (appears ${count}x)`);
+  }
+  if (repeatedIds.length > 3)
+    console.log(`     ...and ${repeatedIds.length - 3} more`);
+  console.log(
+    "\n  [1] Remove repeats (recommended) - every video is added once",
+  );
+  console.log(`      Playlist will have ${uniqueCount} tracks.`);
+  console.log(
+    "  [2] Keep repeats - add the same video again (repeats go at the END of the playlist)",
+  );
+  console.log(
+    `      Playlist would have up to ${totalRows} tracks. YouTube may reject or skip repeats;`,
+  );
+  console.log(
+    "      if so, only the repeats are lost and they are listed in the failed IDs file.",
+  );
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    while (true) {
+      const answer = await rl.question("\nEnter 1 or 2: ");
+      const choice = answer.trim();
+      if (choice === "1") return false;
+      if (choice === "2") return true;
+      console.log("❌ Invalid choice. Please enter 1 or 2.");
+    }
+  } finally {
+    rl.close();
+  }
+}
+
 async function restorePlaylist() {
   try {
     const { getCookies, toCookieHeader } =
@@ -278,8 +428,17 @@ async function restorePlaylist() {
     }
 
     let liveSearchCount = 0;
+    let lastCooldownAt = 0;
     const videoIds = [];
-    const missingTracks = [];
+    const labelById = new Map();
+    const missingEntries = [];
+    const weakAccepts = [];
+    const writeMissingReport = () =>
+      fs.writeFileSync(
+        missingTracksPath,
+        formatMissingReport(missingEntries, selectedCsv.filename, rows.length),
+        "utf8",
+      );
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
@@ -291,6 +450,8 @@ async function restorePlaylist() {
 
       if (videoId) {
         videoIds.push(videoId);
+        if (!labelById.has(videoId))
+          labelById.set(videoId, describeRow(row, i));
         continue;
       }
 
@@ -311,37 +472,92 @@ async function restorePlaylist() {
       }
 
       const searchQuery = searchTerms.join(" - ");
+      const albumKey = Object.keys(row).find((k) =>
+        /^album(\s*name)?$/i.test(k.trim()),
+      );
+      const isrcKey = Object.keys(row).find((k) => /^isrc$/i.test(k.trim()));
+
+      const expected = {
+        title: titleKey && row[titleKey] ? row[titleKey].trim() : "",
+        artists:
+          artistKey && row[artistKey]
+            ? row[artistKey]
+                .split(/[;,]/)
+                .map((x) => x.trim())
+                .filter(Boolean)
+            : [],
+        seconds: expectedSecondsFromRow(row),
+        album: albumKey && row[albumKey] ? row[albumKey].trim() : "",
+        isrc: isrcKey && row[isrcKey] ? row[isrcKey].trim().toUpperCase() : "",
+      };
+      const cacheKey = expected.seconds
+        ? `${searchQuery} [${Math.round(expected.seconds)}s]`
+        : searchQuery;
+      let missNote = null;
+      let missInfo = null;
 
       if (!searchQuery) {
-        const missingEntry = `Row ${i + 1}: (Missing searchable title/artist fields)`;
-        missingTracks.push(missingEntry);
-        fs.writeFileSync(
-          missingTracksPath,
-          missingTracks.join("\n") + "\n",
-          "utf8",
-        );
+        missingEntries.push({
+          label: `Row ${i + 1}`,
+          note: "no title/artist fields found in the CSV for this row",
+        });
+        writeMissingReport();
         continue;
       }
 
-      if (Object.prototype.hasOwnProperty.call(searchCache, searchQuery)) {
-        videoId = searchCache[searchQuery];
-        if (videoId) {
+      if (
+        Object.prototype.hasOwnProperty.call(searchCache, cacheKey) &&
+        !isStaleMiss(searchCache[cacheKey])
+      ) {
+        const cached = searchCache[cacheKey];
+        if (cached && typeof cached === "object" && cached.id) {
+          videoId = cached.id;
+          if (cached.weak)
+            weakAccepts.push({ label: searchQuery, id: videoId });
           console.log(
             `⚡ [${i + 1}/${rows.length}] Cached: "${searchQuery}" -> ${videoId}`,
           );
+        } else if (typeof cached === "string") {
+          videoId = cached;
+          console.log(
+            `⚡ [${i + 1}/${rows.length}] Cached: "${searchQuery}" -> ${videoId}`,
+          );
+        } else {
+          videoId = null;
+          missNote = (cached && cached.none) || "no verified match (cached)";
+          missInfo = (cached && cached.miss) || null;
         }
       } else {
         console.log(
           `🔍 [${i + 1}/${rows.length}] Searching YT Music for: "${searchQuery}"...`,
         );
-        videoId = await searchVideoId(searchQuery);
+        const result = await searchVideoId(searchQuery, expected);
+        videoId = result.id;
 
         if (videoId) {
-          console.log(`   ✅ Resolved: ${videoId}`);
-          searchCache[searchQuery] = videoId;
+          console.log(`   ✅ Resolved: ${videoId} (${result.reason})`);
+          searchCache[cacheKey] = result.weak
+            ? { id: videoId, weak: true, v: MATCHER_VERSION }
+            : videoId;
+          if (result.weak) {
+            weakAccepts.push({ label: searchQuery, id: videoId });
+            console.log(
+              "   ⚠️ Accepted on weaker evidence (see the summary at the end).",
+            );
+          }
         } else {
-          console.log(`   ⚠️ No match found for: "${searchQuery}"`);
-          searchCache[searchQuery] = null;
+          console.log(
+            `   ⚠️ No verified match for: "${searchQuery}" - ${result.note}`,
+          );
+          missNote = result.note;
+          missInfo = result.miss || null;
+          if (!result.error) {
+            searchCache[cacheKey] = {
+              none: result.note,
+              miss: result.miss,
+              v: MATCHER_VERSION,
+            };
+          }
         }
 
         fs.writeFileSync(
@@ -349,12 +565,13 @@ async function restorePlaylist() {
           JSON.stringify(searchCache, null, 2),
           "utf8",
         );
-        liveSearchCount++;
+        liveSearchCount += Math.max(1, result.searches || 1);
 
         const jitter = Math.floor(Math.random() * 1500) + 1500;
         await new Promise((r) => setTimeout(r, jitter));
 
-        if (liveSearchCount % 25 === 0) {
+        if (liveSearchCount - lastCooldownAt >= 25) {
+          lastCooldownAt = liveSearchCount;
           console.log(
             "⏱️ Taking a 15-second cooldown pause to respect rate limits...",
           );
@@ -364,19 +581,32 @@ async function restorePlaylist() {
 
       if (videoId) {
         videoIds.push(videoId);
+        if (!labelById.has(videoId))
+          labelById.set(videoId, describeRow(row, i));
       } else {
-        missingTracks.push(searchQuery);
-        fs.writeFileSync(
-          missingTracksPath,
-          missingTracks.join("\n") + "\n",
-          "utf8",
+        missingEntries.push({
+          label: searchQuery,
+          note: missNote,
+          miss: missInfo,
+        });
+        writeMissingReport();
+      }
+    }
+
+    if (weakAccepts.length > 0) {
+      console.log(
+        `\n⚠️ ${weakAccepts.length} track(s) were added on weaker evidence: first ISRC result, length within 1s,\n   but the title/artist are in a different writing system so they couldn't be compared. Worth a quick listen:`,
+      );
+      for (const w of weakAccepts) {
+        console.log(
+          `   • ${w.label}\n     https://music.youtube.com/watch?v=${w.id}`,
         );
       }
     }
 
-    if (missingTracks.length > 0) {
+    if (missingEntries.length > 0) {
       console.log(
-        `\n⚠️ Summary: ${missingTracks.length} track(s) could not be found on YouTube Music.`,
+        `\n⚠️ Summary: ${missingEntries.length} track(s) could not be found on YouTube Music.`,
       );
       console.log(
         `📄 A readable list has been saved to: ${missingTracksPath}\nLook for the missing tracks in this file and add them manually.`,
@@ -384,6 +614,48 @@ async function restorePlaylist() {
     } else {
       if (fs.existsSync(missingTracksPath)) {
         fs.unlinkSync(missingTracksPath);
+      }
+    }
+
+    const idCounts = new Map();
+    for (const id of videoIds) idCounts.set(id, (idCounts.get(id) || 0) + 1);
+    const repeatedIds = [...idCounts].filter(([, c]) => c > 1);
+    let repeatStart = videoIds.length;
+
+    if (repeatedIds.length > 0) {
+      const keepRepeats = await askKeepRepeats({
+        totalRows: videoIds.length,
+        uniqueCount: idCounts.size,
+        repeatedIds,
+        labelById,
+      });
+
+      if (keepRepeats) {
+        const seen = new Set();
+        const firstPass = [];
+        const repeatPass = [];
+        for (const id of videoIds) {
+          if (seen.has(id)) repeatPass.push(id);
+          else {
+            seen.add(id);
+            firstPass.push(id);
+          }
+        }
+        videoIds.length = 0;
+        videoIds.push(...firstPass, ...repeatPass);
+        repeatStart = firstPass.length;
+        console.log(
+          `🔁 Keeping repeats: ${firstPass.length} unique tracks first, then ${repeatPass.length} repeat(s) at the end.`,
+        );
+      } else {
+        const removed = videoIds.length - idCounts.size;
+        const uniqueIds = [...idCounts.keys()];
+        videoIds.length = 0;
+        videoIds.push(...uniqueIds);
+        repeatStart = videoIds.length;
+        console.log(
+          `🧹 Removed ${removed} repeated entr${removed === 1 ? "y" : "ies"}. Sending ${uniqueIds.length} unique tracks.`,
+        );
       }
     }
 
@@ -471,12 +743,18 @@ async function restorePlaylist() {
     let tracksAdded = 0;
     let confirmedAdded = 0;
     const failedVideoIds = [];
-    const failedPath = path.join(csvDirectory, "failed_ids.json");
+    const failedPath = path.join(
+      csvDirectory,
+      `failed_ids_${selectedCsv.filename}.json`,
+    );
     const editUrl =
       "https://music.youtube.com/youtubei/v1/browse/edit_playlist";
 
-    for (let i = 0; i < total; i += BATCH_SIZE) {
-      const chunk = videoIds.slice(i, i + BATCH_SIZE);
+    let i = 0;
+    while (i < total) {
+      let end = Math.min(i + BATCH_SIZE, total);
+      if (i < repeatStart && end > repeatStart) end = repeatStart;
+      const chunk = videoIds.slice(i, end);
 
       const result = await addBatchChecked(
         editUrl,
@@ -485,6 +763,12 @@ async function restorePlaylist() {
         playlistId,
         chunk,
       );
+
+      if (!result.ok && result.fatal) {
+        throw new Error(
+          `Aborting: ${result.reason}. Log in again, then run 'node src/resumer.js'.`,
+        );
+      }
 
       if (result.ok) {
         confirmedAdded += chunk.length;
@@ -498,20 +782,16 @@ async function restorePlaylist() {
         console.log(
           `❌ Batch at [${i + 1}-${i + chunk.length}] FAILED: ${result.reason}`,
         );
-        if (result.fatal) {
-          throw new Error(
-            `Aborting: ${result.reason}. Log in again and re-run.`,
-          );
-        }
       }
 
-      tracksAdded = Math.min(i + BATCH_SIZE, total);
+      tracksAdded = end;
 
       saveState(stateFilePath, selectedCsv.filename, {
         playlistId: playlistId,
         tracksAdded: tracksAdded,
         confirmedAdded: confirmedAdded,
         failedVideoIds: failedVideoIds,
+        repeatStart: repeatStart,
         totalTracks: total,
         completed: tracksAdded === total && failedVideoIds.length === 0,
         lastUpdated: new Date().toISOString(),
@@ -529,15 +809,23 @@ async function restorePlaylist() {
         console.log(`⏱️ Waiting ${randomDelay / 1000}s before next batch...`);
         await sleep(randomDelay);
       }
+
+      i = end;
     }
 
     if (failedVideoIds.length > 0) {
       console.log(
-        `\n⚠️ ${failedVideoIds.length} track(s) were NOT added. IDs saved to ${failedPath}`,
+        `\n⚠️ ${failedVideoIds.length} track(s) were NOT added. IDs saved to ${failedPath}\n💡 Run 'node src/resumer.js' to retry them.`,
       );
     }
 
-    console.log("\n🎊 Playlist restoration complete! Check your account.");
+    if (failedVideoIds.length === 0) {
+      console.log("\n🎊 Playlist restoration complete! Check your account.");
+    } else {
+      console.log(
+        "\n⚠️ Finished with failures (see above). Playlist is incomplete.",
+      );
+    }
   } catch (err) {
     console.error("\n❌ Script Interrupted:", err.message);
     if (err.message.includes("Failed to create playlist")) {

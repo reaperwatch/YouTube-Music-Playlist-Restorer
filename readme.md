@@ -22,7 +22,7 @@ npm install
 
 1. **Log in:** Make sure you are logged into [YouTube Music](https://music.youtube.com) or [YouTube](https://youtube.com) on the browser.
 
-2. **Add CSVs:** If you are restoring a playlist, drop your `.csv` file(s) into the `youtubeApi` folder of this project.
+2. **Add CSVs:** If you are restoring a playlist, drop your `.csv` file(s) into the `youtubeApi` folder of this project. (make sure they're in english)
 
 ---
 
@@ -60,6 +60,8 @@ node src/yt-csv-to-playlist.js
 - If multiple CSVs exist, you'll be prompted to pick one.
 
 - Progress and playlist state are automatically updated in `restore_state.json` after every batch.
+
+- if you are using a csv without youtube IDs `search_cache.json` file will be made to save your searches along with `missing_tracks.txt`, if you wanna try a new csv delete those existing files first!!!! (only applies to CSVs without video IDs) SUPER DUPER recommened for the CSV to have ISRC codes if it doesn't have YT IDs!!!!
 
 ### Resume Interrupted Tasks
 
