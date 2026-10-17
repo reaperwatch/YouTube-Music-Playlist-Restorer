@@ -320,10 +320,16 @@ async function addBatchChecked(
   return { ok: false, fatal: false, reason };
 }
 
-function describeRow(row, index) {
-  const artistKey = Object.keys(row).find((k) =>
-    /artist|channel|creator/i.test(k),
+function findArtistKey(row) {
+  const keys = Object.keys(row);
+  return (
+    keys.find((k) => /artist name/i.test(k) && !/album/i.test(k)) ||
+    keys.find((k) => /artist|channel|creator/i.test(k) && !/uri|album/i.test(k))
   );
+}
+
+function describeRow(row, index) {
+  const artistKey = findArtistKey(row);
   const titleKey = Object.keys(row).find(
     (k) => /title|track name|song name/i.test(k) && !/uri/i.test(k),
   );
@@ -456,9 +462,7 @@ async function restorePlaylist() {
       }
 
       const searchTerms = [];
-      const artistKey = Object.keys(row).find((k) =>
-        /artist|channel|creator/i.test(k),
-      );
+      const artistKey = findArtistKey(row);
       if (artistKey && row[artistKey] && row[artistKey].trim()) {
         const cleanArtist = row[artistKey].trim().replace(/;/g, ", ");
         searchTerms.push(cleanArtist);

@@ -61,7 +61,7 @@ node src/yt-csv-to-playlist.js
 
 - Progress and playlist state are automatically updated in `restore_state.json` after every batch.
 
-- if you are using a csv without youtube IDs `search_cache.json` file will be made to save your searches along with `missing_tracks.txt`, if you wanna try a new csv delete those existing files first!!!! (only applies to CSVs without video IDs) SUPER DUPER recommened for the CSV to have ISRC codes if it doesn't have YT IDs!!!!
+- if you are using a csv without youtube IDs `search_cache.json` file will be made to save your searches along with `missing_tracks.txt`, if you wanna try a new csv delete those existing files first!!!! (only applies to CSVs without video IDs) SUPER DUPER recommened for the CSV to have ISRC codes if it doesn't have YT IDs!!!! (like: https://exportify.app/ for spotify csvs)
 
 ### Resume Interrupted Tasks
 
