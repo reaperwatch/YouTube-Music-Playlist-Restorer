@@ -1,3 +1,4 @@
+// yes Claude did this part😭 spend like 3 days just for it to not work and gave up 
 // Picks the right YouTube Music result for a CSV row by checking title + duration,
 // instead of blindly trusting the first search result. Also formats missing_tracks.txt.
 // Put this file next to yt-csv-to-playlist.js and browser-paths.js.
